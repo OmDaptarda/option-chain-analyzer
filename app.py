@@ -1,6 +1,7 @@
 import math
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -148,15 +149,18 @@ def validate_chain(chain: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+@st.cache_data(show_spinner=False)
 def analyze_chain(
     chain: pd.DataFrame, spot: float, time: float, rate: float, dividend: float, volatility: float
 ) -> pd.DataFrame:
     result = validate_chain(chain)
-    result["model_price"] = result.apply(
-        lambda row: model_price(
-            spot, float(row["strike"]), time, rate, volatility, str(row["option_type"]), dividend
-        ),
-        axis=1,
+    strikes = result["strike"].to_numpy(dtype=float)
+    option_types = result["option_type"].to_numpy()
+    result["model_price"] = np.array(
+        [
+            model_price(spot, strike, time, rate, volatility, option_type, dividend)
+            for strike, option_type in zip(strikes, option_types)
+        ]
     )
     result["implied_volatility"] = result.apply(
         lambda row: implied_volatility(
@@ -181,13 +185,22 @@ def analyze_chain(
     return pd.concat([result, pd.DataFrame(greek_rows.tolist(), index=result.index)], axis=1)
 
 
-def payoff_chart(spot: float, strike: float, premium: float, option_type: str) -> go.Figure:
-    prices = [spot * (0.5 + i / 100.0) for i in range(101)]
-    sign = 1 if option_type == "Call" else -1
-    payoffs = [max(sign * (price - strike), 0.0) - premium for price in prices]
-    figure = go.Figure(go.Scatter(x=prices, y=payoffs, mode="lines", name=f"{option_type} P/L"))
+def payoff_chart(
+    spot: float, strike: float, premium: float, option_type: str, position: str
+) -> go.Figure:
+    prices = np.linspace(spot * 0.5, spot * 1.5, 151)
+    option_sign = 1 if option_type == "Call" else -1
+    position_sign = 1 if position == "Long" else -1
+    payoffs = position_sign * (np.maximum(option_sign * (prices - strike), 0.0) - premium)
+    break_even = strike + premium if option_type == "Call" else strike - premium
+    figure = go.Figure(
+        go.Scatter(x=prices, y=payoffs, mode="lines", name=f"{position} {option_type} P/L",
+                   line={"color": "#0f766e", "width": 3})
+    )
     figure.add_hline(y=0, line_dash="dot", line_color="#64748b")
     figure.add_vline(x=strike, line_dash="dot", line_color="#f59e0b", annotation_text="Strike")
+    figure.add_vline(x=spot, line_dash="dash", line_color="#12304a", annotation_text="Spot")
+    figure.add_vline(x=break_even, line_dash="dot", line_color="#7c3aed", annotation_text="Break-even")
     figure.update_layout(
         template="plotly_white",
         margin={"l": 10, "r": 10, "t": 20, "b": 10},
@@ -195,6 +208,54 @@ def payoff_chart(spot: float, strike: float, premium: float, option_type: str) -
         xaxis_title="Underlying price at expiry",
         yaxis_title="Profit / loss per share",
         hovermode="x unified",
+    )
+    return figure
+
+
+def opportunity_chart(analyzed: pd.DataFrame) -> go.Figure:
+    figure = go.Figure()
+    colors = {"UNDERPRICED": "#0f766e", "OVERPRICED": "#c2410c", "FAIR": "#64748b"}
+    for option_type in ("Call", "Put"):
+        subset = analyzed[analyzed["option_type"] == option_type]
+        for signal, group in subset.groupby("signal", sort=False):
+            figure.add_trace(
+                go.Scatter(
+                    x=group["strike"],
+                    y=group["edge_pct"],
+                    mode="markers",
+                    name=f"{option_type} · {signal.title()}",
+                    marker={"color": colors[signal], "size": 10, "symbol": "circle" if option_type == "Call" else "diamond"},
+                    customdata=group[["option_type", "market_price", "model_price", "implied_volatility"]].fillna(0).to_numpy(),
+                    hovertemplate=(
+                        "<b>%{customdata[0]} %{x:.2f}</b><br>"
+                        "Market $%{customdata[1]:.2f}<br>Model $%{customdata[2]:.2f}<br>"
+                        "IV %{customdata[3]:.1%}<br>Edge %{y:.2%}<extra></extra>"
+                    ),
+                )
+            )
+    figure.add_hline(y=0, line_dash="dot", line_color="#94a3b8")
+    figure.update_layout(
+        template="plotly_white", height=390, margin={"l": 10, "r": 10, "t": 20, "b": 10},
+        xaxis_title="Strike", yaxis_title="Model edge (% of market price)",
+        legend={"orientation": "h", "y": 1.12}, hovermode="closest",
+    )
+    return figure
+
+
+def volatility_smile_chart(analyzed: pd.DataFrame) -> go.Figure:
+    figure = go.Figure()
+    for option_type, color in (("Call", "#0f766e"), ("Put", "#7c3aed")):
+        subset = analyzed[(analyzed["option_type"] == option_type) & analyzed["implied_volatility"].notna()]
+        figure.add_trace(
+            go.Scatter(
+                x=subset["strike"], y=subset["implied_volatility"], mode="lines+markers",
+                name=option_type, line={"color": color, "width": 2},
+                hovertemplate=f"{option_type} · Strike %{{x:.2f}}<br>Implied vol %{{y:.1%}}<extra></extra>",
+            )
+        )
+    figure.update_layout(
+        template="plotly_white", height=350, margin={"l": 10, "r": 10, "t": 20, "b": 10},
+        xaxis_title="Strike", yaxis_title="Implied volatility", hovermode="x unified",
     )
     return figure
 
@@ -210,6 +271,7 @@ st.markdown(
     .app-subtitle { color: var(--muted); font-size: 1.05rem; margin-bottom: 1.5rem; }
     .hero { background: #eef6f5; border: 1px solid #c9e5e0; border-radius: 12px; padding: 1rem 1.2rem; margin: .5rem 0 1.5rem; }
     .hero strong { color: var(--navy); }
+    .eyebrow { color: var(--teal); text-transform: uppercase; letter-spacing: .12em; font-size: .72rem; font-weight: 700; margin-bottom: .2rem; }
     .section-note { color: var(--muted); font-size: .92rem; margin-top: -.55rem; margin-bottom: 1rem; }
     [data-testid="stMetric"] { background: #f8fafc; border: 1px solid var(--line); padding: .8rem 1rem; border-radius: 10px; }
     [data-testid="stMetricLabel"] { color: var(--muted); }
@@ -258,11 +320,12 @@ analyzed["signal"] = analyzed["edge_pct"].apply(
 )
 
 overview_tab, quotes_tab, payoff_tab, learn_tab = st.tabs(
-    ["Overview", "Quote scanner", "Payoff explorer", "Learn the basics"]
+    ["Market map", "Quote scanner", "Scenario lab", "Learn the basics"]
 )
 
 with overview_tab:
-    st.header("Your model snapshot")
+    st.markdown('<div class="eyebrow">Live market map</div>', unsafe_allow_html=True)
+    st.header("Find the interesting quotes")
     st.markdown(
         f'<p class="section-note">Based on a ${spot:,.2f} underlying, {int(days)} days to expiry, and '
         f'{volatility:.1%} model volatility.</p>',
@@ -274,13 +337,36 @@ with overview_tab:
     col3.metric("Overpriced", f"{int((analyzed['signal'] == 'OVERPRICED').sum()):,}")
     col4.metric("Average model edge", f"{analyzed['edge_pct'].mean():.2%}")
 
+    chart_col, list_col = st.columns([1.8, 1])
+    with chart_col:
+        st.plotly_chart(opportunity_chart(analyzed), use_container_width=True, config={"displaylogo": False})
+    with list_col:
+        st.subheader("Top model edges")
+        top_edges = analyzed.nlargest(5, "edge_pct")[["option_type", "strike", "edge_pct", "signal"]].copy()
+        top_edges["strike"] = top_edges["strike"].map(lambda value: f"${value:,.2f}")
+        top_edges["edge_pct"] = top_edges["edge_pct"].map(lambda value: f"{value:.2%}")
+        st.dataframe(top_edges, hide_index=True, use_container_width=True)
+        st.caption("Teal points are model-underpriced; orange points are model-overpriced. Circles are calls, diamonds are puts.")
+
+    smile_col, explainer_col = st.columns([1.4, 1])
+    with smile_col:
+        st.subheader("Implied volatility shape")
+        st.plotly_chart(volatility_smile_chart(analyzed), use_container_width=True, config={"displaylogo": False})
+    with explainer_col:
+        st.subheader("How to read this")
+        st.write(
+            f"The opportunity map plots each quote's model edge. A point at +10% means the model estimates "
+            f"a value 10% above the market quote. The signal threshold is currently {threshold:.0%}."
+        )
+        st.info("Use the scanner to narrow the chain, then open Scenario lab for a selected quote.")
+
     st.subheader("What does this mean?")
     st.write(
         f"The model estimates a theoretical value for each quote. A quote is **underpriced** when the "
         f"model is at least {threshold:.0%} above its market price, **overpriced** when it is at least "
         f"{threshold:.0%} below, and **fair** when the difference falls in between."
     )
-    st.info("Start with the Quote scanner to filter the chain, then use Payoff explorer to understand one quote at expiry.")
+    st.info("This is a research signal, not a trade recommendation. Spreads, liquidity, exercise style, and skew can change the real-world result.")
 
 with quotes_tab:
     st.header("Quote scanner")
@@ -328,11 +414,12 @@ with quotes_tab:
         )
 
 with payoff_tab:
-    st.header("Payoff explorer")
-    st.markdown('<p class="section-note">See how one long option position changes value at expiry. This is not a trade recommendation.</p>', unsafe_allow_html=True)
+    st.markdown('<div class="eyebrow">Interactive what-if</div>', unsafe_allow_html=True)
+    st.header("Scenario lab")
+    st.markdown('<p class="section-note">Change one assumption at a time and see how the selected position responds. Nothing here executes a trade.</p>', unsafe_allow_html=True)
     quote_options = analyzed.index.tolist()
     selected = st.selectbox(
-        "Choose a quote",
+        "Choose a quote to stress-test",
         quote_options,
         format_func=lambda index: (
             f"{analyzed.loc[index, 'option_type']} {analyzed.loc[index, 'strike']:.2f} "
@@ -340,26 +427,50 @@ with payoff_tab:
         ),
     )
     selected_row = analyzed.loc[selected]
-    chart_col, detail_col = st.columns([2.2, 1])
-    with chart_col:
+    control_col, detail_col = st.columns([1, 2.2])
+    with control_col:
+        position = st.radio("Position", ["Long", "Short"], horizontal=True)
+        scenario_spot = st.slider(
+            "Underlying at expiry",
+            min_value=float(spot * 0.5),
+            max_value=float(spot * 1.5),
+            value=float(spot),
+            step=max(float(spot) / 100, 0.01),
+        )
+        scenario_volatility = st.slider("Volatility scenario (%)", 1, 200, int(volatility * 100), step=1) / 100
+        scenario_days = st.slider("Days remaining", 1, int(days), int(days), step=1)
+        scenario_model_price = model_price(
+            scenario_spot, float(selected_row["strike"]), scenario_days / 365, rate,
+            scenario_volatility, str(selected_row["option_type"]), dividend,
+        )
+        st.metric("Scenario model price", f"${scenario_model_price:.2f}")
+    with detail_col:
+        st.subheader("Expiry payoff")
         st.plotly_chart(
             payoff_chart(
                 spot,
                 float(selected_row["strike"]),
                 float(selected_row["market_price"]),
                 str(selected_row["option_type"]),
+                position,
             ),
             use_container_width=True,
+            config={"displaylogo": False},
         )
-    with detail_col:
-        st.subheader("Selected quote")
-        st.metric("Market price", f"${selected_row['market_price']:.2f}")
-        st.metric("Model price", f"${selected_row['model_price']:.2f}")
-        st.metric("Model edge", f"{selected_row['edge_pct']:.2%}")
-        st.write(
-            f"At expiry, this long {str(selected_row['option_type']).lower()} starts profitable above "
-            f"the strike plus premium (call) or below the strike minus premium (put)."
-        )
+    break_even = (
+        float(selected_row["strike"]) + float(selected_row["market_price"])
+        if str(selected_row["option_type"]) == "Call"
+        else float(selected_row["strike"]) - float(selected_row["market_price"])
+    )
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+    metric_col1.metric("Break-even", f"${break_even:,.2f}")
+    metric_col2.metric("Current delta", f"{selected_row['Delta']:.3f}")
+    metric_col3.metric("Current theta / day", f"{selected_row['Theta']:.4f}")
+    metric_col4.metric("Current vega / 1%", f"{selected_row['Vega']:.4f}")
+    st.caption(
+        f"At the selected expiry price of ${scenario_spot:,.2f}, the estimated payoff is shown at expiry. "
+        f"Changing volatility and days updates the scenario model price above."
+    )
 
 with learn_tab:
     st.header("Learn the basics")

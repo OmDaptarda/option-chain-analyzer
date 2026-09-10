@@ -1,6 +1,6 @@
 # Option Chain Analyzer
 
-A beginner-friendly Streamlit research tool for comparing option-chain quotes with Black–Scholes estimates. It includes implied volatility, Greeks, configurable model-edge signals, filters, and an expiry payoff chart.
+A beginner-friendly Streamlit research tool for comparing option-chain quotes with Black–Scholes estimates. It includes implied volatility, Greeks, configurable model-edge signals, an interactive opportunity map, volatility smile, filters, and a scenario lab with expiry payoff analysis.
 
 This is a **research and paper-trading tool only**. It does not place orders or connect to a brokerage.
 
@@ -14,6 +14,13 @@ streamlit run app.py
 ```
 
 The app opens with a generated demo chain, so it is usable without a data file. Use the sidebar to change assumptions or upload your own CSV.
+
+## Explore the app
+
+- **Market map:** scan model edge by strike, compare calls and puts, review the top model edges, and inspect the implied-volatility shape.
+- **Quote scanner:** filter by signal, option type, and strike range, then download the filtered analysis.
+- **Scenario lab:** choose a quote and stress-test long/short position, underlying price at expiry, volatility, and time remaining. Break-even and key Greeks stay visible beside the payoff chart.
+- **Learn the basics:** see the model assumptions, signal calculation, and CSV rules in plain English.
 
 ## Deploy on Streamlit Community Cloud
 
